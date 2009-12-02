@@ -120,10 +120,31 @@ static void mmc_consistent_populate_buckets(mmc_consistent_state_t *state) /* {{
 }
 /* }}} */
 
+static int should_failover(mmc_t *mmc, mmc_t *proxy TSRMLS_DC)
+{
+    int failover = 0;
+    if (proxy == NULL) {
+        failover =  !mmc_open(mmc, 0, NULL, NULL TSRMLS_CC);
+    } else if (mmc->status == MMC_STATUS_FAILED) {
+        if (mmc->retry_interval >= 0 && 
+            (long)time(NULL) >= mmc->failed + mmc->retry_interval) {
+            mmc->status = MMC_STATUS_UNKNOWN;
+        } else {
+            failover = 1;
+        }
+    }
+    return failover;
+}
+
 mmc_t *mmc_consistent_find_server(void *s, const char *key, int key_len TSRMLS_DC) /* {{{ */
 {
 	mmc_consistent_state_t *state = s;
-	mmc_t *mmc;
+	mmc_t *mmc, *proxy = NULL;
+
+    if (MEMCACHE_G(proxy_enabled)) {
+        proxy = mmc_get_proxy(TSRMLS_CC);
+        if (proxy == NULL) return NULL;
+    }
 
 	if (state->num_servers > 1) {
 		unsigned int i, hash = state->hash(key, key_len);
@@ -135,7 +156,7 @@ mmc_t *mmc_consistent_find_server(void *s, const char *key, int key_len TSRMLS_D
 		mmc = state->buckets[hash % MMC_CONSISTENT_BUCKETS];
 
 		/* perform failover if needed */
-		for (i=0; !mmc_open(mmc, 0, NULL, NULL TSRMLS_CC) && MEMCACHE_G(allow_failover) && i<MEMCACHE_G(max_failover_attempts); i++) {
+		for (i=0; should_failover(mmc, proxy TSRMLS_CC) && MEMCACHE_G(allow_failover) && i<MEMCACHE_G(max_failover_attempts); i++) {
 			char *next_key = emalloc(key_len + MAX_LENGTH_OF_LONG + 1);
 			int next_len = sprintf(next_key, "%s-%d", key, i);
 			MMC_DEBUG(("mmc_consistent_find_server: failed to connect to server '%s:%d' status %d, trying next", mmc->host, mmc->port, mmc->status));
@@ -148,8 +169,19 @@ mmc_t *mmc_consistent_find_server(void *s, const char *key, int key_len TSRMLS_D
 	}
 	else {
 		mmc = state->points[0].server;
-		mmc_open(mmc, 0, NULL, NULL TSRMLS_CC);
+        if (proxy == NULL) {
+		    mmc_open(mmc, 0, NULL, NULL TSRMLS_CC);
+        } else {
+            if (should_failover(mmc, proxy TSRMLS_CC)) return NULL;
+        }
 	}
+
+    if (proxy != NULL && mmc->status != MMC_STATUS_FAILED) {
+        mmc_server_disconnect(mmc TSRMLS_CC);
+        mmc->proxy = proxy;
+    } else {
+        mmc->proxy = NULL;
+    }
 
 	return mmc->status != MMC_STATUS_FAILED ? mmc : NULL;
 }

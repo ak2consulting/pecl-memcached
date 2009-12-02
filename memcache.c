@@ -31,6 +31,9 @@
 #include <sys/file.h>
 #endif
 
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
 #include <zlib.h>
 #include <time.h>
 #include "ext/standard/crc32.h"
@@ -203,6 +206,16 @@ static PHP_INI_MH(OnUpdateDefaultTimeout) /* {{{ */
 }
 /* }}} */
 
+static PHP_INI_MH(OnUpdateProxyHost) /* {{{ */
+{
+    if (new_value != NULL) {
+        MEMCACHE_G(proxy_hostlen) = strlen(new_value);
+       return OnUpdateString(entry, new_value, new_value_length, mh_arg1, mh_arg2, mh_arg3, stage TSRMLS_CC);
+    }
+    return SUCCESS;
+}
+/* }}} */
+ 
 /* {{{ PHP_INI */
 PHP_INI_BEGIN()
 	STD_PHP_INI_ENTRY("memcache.allow_failover",	"1",		PHP_INI_ALL, OnUpdateLong,		allow_failover,	zend_memcache_globals,	memcache_globals)
@@ -212,6 +225,10 @@ PHP_INI_BEGIN()
 	STD_PHP_INI_ENTRY("memcache.hash_strategy",		"standard",	PHP_INI_ALL, OnUpdateHashStrategy,	hash_strategy,	zend_memcache_globals,	memcache_globals)
 	STD_PHP_INI_ENTRY("memcache.hash_function",		"crc32",	PHP_INI_ALL, OnUpdateHashFunction,	hash_function,	zend_memcache_globals,	memcache_globals)
 	STD_PHP_INI_ENTRY("memcache.default_timeout_ms",	"1000",	PHP_INI_ALL, OnUpdateDefaultTimeout,	default_timeout_ms,	zend_memcache_globals,	memcache_globals)
+   STD_PHP_INI_ENTRY("memcache.tcp_nodelay",       "1",        PHP_INI_ALL, OnUpdateBool, tcp_nodelay,     zend_memcache_globals,  memcache_globals)
+   STD_PHP_INI_ENTRY("memcache.proxy_enabled",     "0",    PHP_INI_ALL, OnUpdateBool,  proxy_enabled,  zend_memcache_globals,  memcache_globals)
+   STD_PHP_INI_ENTRY("memcache.proxy_host",        NULL,   PHP_INI_ALL, OnUpdateProxyHost, proxy_host, zend_memcache_globals,  memcache_globals)
+   STD_PHP_INI_ENTRY("memcache.proxy_port",        "0",    PHP_INI_ALL, OnUpdateLong,  proxy_port, zend_memcache_globals,  memcache_globals)
 PHP_INI_END()
 /* }}} */
 
@@ -220,7 +237,6 @@ static void _mmc_pool_list_dtor(zend_rsrc_list_entry * TSRMLS_DC);
 static void _mmc_pserver_list_dtor(zend_rsrc_list_entry * TSRMLS_DC);
 
 static void mmc_server_free(mmc_t * TSRMLS_DC);
-static void mmc_server_disconnect(mmc_t * TSRMLS_DC);
 static int mmc_server_store(mmc_t *, const char *, int TSRMLS_DC);
 
 static int mmc_compress(char **, unsigned long *, const char *, int TSRMLS_DC);
@@ -256,6 +272,11 @@ static void php_memcache_init_globals(zend_memcache_globals *memcache_globals_p 
 	MEMCACHE_G(hash_strategy)	  = MMC_STANDARD_HASH;
 	MEMCACHE_G(hash_function)	  = MMC_HASH_CRC32;
 	MEMCACHE_G(default_timeout_ms)= (MMC_DEFAULT_TIMEOUT) * 1000;
+	MEMCACHE_G(tcp_nodelay)       = 1;
+	MEMCACHE_G(proxy_enabled)     = 0;
+	MEMCACHE_G(proxy_host)        = NULL;
+	MEMCACHE_G(proxy_hostlen)     = 0;
+	MEMCACHE_G(proxy_port)        = 0;
 }
 /* }}} */
 
@@ -382,7 +403,11 @@ mmc_t *mmc_server_new(char *host, int host_len, unsigned short port, int persist
 	mmc->host = pemalloc(host_len + 1, persistent);
 	memcpy(mmc->host, host, host_len);
 	mmc->host[host_len] = '\0';
-	
+
+    mmc->proxy_str = pemalloc(4 + host_len + 1 + MAX_LENGTH_OF_LONG + 1, persistent);
+    sprintf(mmc->proxy_str, "A:%s:%d ", host, port);
+    mmc->proxy_str_len = strlen(mmc->proxy_str);
+
 	mmc->port = port;
 	mmc->status = MMC_STATUS_DISCONNECTED;
 
@@ -453,6 +478,7 @@ static void mmc_server_free(mmc_t *mmc TSRMLS_DC) /* {{{ */
 
 	if (mmc->persistent) {
 		free(mmc->host);
+		free(mmc->proxy_str);
 		free(mmc);
 		MEMCACHE_G(num_persistent)--;
 	}
@@ -461,6 +487,7 @@ static void mmc_server_free(mmc_t *mmc TSRMLS_DC) /* {{{ */
 			php_stream_close(mmc->stream);
 		}
 		efree(mmc->host);
+		efree(mmc->proxy_str);
 		efree(mmc);
 	}
 }
@@ -496,6 +523,12 @@ static void mmc_server_received_error(mmc_t *mmc, int response_len)  /* {{{ */
 
 int mmc_server_failure(mmc_t *mmc TSRMLS_DC) /*determines if a request should be retried or is a hard network failure {{{ */
 {
+    if (mmc->proxy) {
+        mmc_server_disconnect(mmc->proxy);
+	    mmc_server_deactivate(mmc TSRMLS_CC);
+	    return 1;
+    }
+
 	switch (mmc->status) {
 		case MMC_STATUS_DISCONNECTED:
 			return 0;
@@ -514,13 +547,25 @@ int mmc_server_failure(mmc_t *mmc TSRMLS_DC) /*determines if a request should be
 static int mmc_server_store(mmc_t *mmc, const char *request, int request_len TSRMLS_DC) /* {{{ */
 {
 	int response_len;
-	php_netstream_data_t *sock = (php_netstream_data_t*)mmc->stream->abstract;
+    php_stream *stream;
+
+    if (mmc->proxy) {
+        stream = mmc->proxy->stream;
+        if (php_stream_write(stream, mmc->proxy_str, mmc->proxy_str_len) != mmc->proxy_str_len) {
+            mmc_server_seterror(mmc, "Failed sending proxy string", 0);
+            return -1;
+        }
+    } else {
+        stream = mmc->stream;
+    }
+
+	php_netstream_data_t *sock = (php_netstream_data_t*)stream->abstract;
 
 	if (mmc->timeoutms > 1) {
 		sock->timeout = _convert_timeoutms_to_ts(mmc->timeoutms);
 	}
 
-	if (php_stream_write(mmc->stream, request, request_len) != request_len) {
+	if (php_stream_write(stream, request, request_len) != request_len) {
 		mmc_server_seterror(mmc, "Failed sending command and value to stream", 0);
 		return -1;
 	}
@@ -991,6 +1036,10 @@ static int _mmc_open(mmc_t *mmc, char **error_string, int *errnum TSRMLS_DC) /* 
 	php_stream_set_option(mmc->stream, PHP_STREAM_OPTION_WRITE_BUFFER, PHP_STREAM_BUFFER_NONE, NULL);
 	php_stream_set_chunk_size(mmc->stream, MEMCACHE_G(chunk_size));
 
+    int socketd = ((php_netstream_data_t*)mmc->stream->abstract)->socket;
+    int flag = MEMCACHE_G(tcp_nodelay)? 1: 0;
+    setsockopt(socketd, IPPROTO_TCP,  TCP_NODELAY, (void *) &flag, sizeof(int));
+
 	mmc->status = MMC_STATUS_CONNECTED;
 
 	if (mmc->error != NULL) {
@@ -1037,7 +1086,7 @@ int mmc_open(mmc_t *mmc, int force_connect, char **error_string, int *errnum TSR
 }
 /* }}} */
 
-static void mmc_server_disconnect(mmc_t *mmc TSRMLS_DC) /* {{{ */
+void mmc_server_disconnect(mmc_t *mmc TSRMLS_DC) /* {{{ */
 {
 	if (mmc->stream != NULL) {
 		if (mmc->persistent) {
@@ -1106,12 +1155,13 @@ static int mmc_readline(mmc_t *mmc TSRMLS_DC) /* {{{ */
 	char *response;
 	size_t response_len;
 
-	if (mmc->stream == NULL) {
+    php_stream *stream = mmc->proxy? mmc->proxy->stream: mmc->stream;
+    if (stream == NULL) {
 		mmc_server_seterror(mmc, "Socket is closed", 0);
 		return -1;
 	}
 
-	response = php_stream_get_line(mmc->stream, ZSTR(mmc->inbuf), MMC_BUF_SIZE, &response_len);
+	response = php_stream_get_line(stream, ZSTR(mmc->inbuf), MMC_BUF_SIZE, &response_len);
 	if (response) {
 		MMC_DEBUG(("mmc_readline: read data:"));
 		MMC_DEBUG(("mmc_readline:---"));
@@ -1163,8 +1213,18 @@ static int mmc_str_left(char *haystack, char *needle, int haystack_len, int need
 static int mmc_sendcmd(mmc_t *mmc, const char *cmd, int cmdlen TSRMLS_DC) /* {{{ */
 {
 	char *command;
-	int command_len;
-	php_netstream_data_t *sock = (php_netstream_data_t*)mmc->stream->abstract;
+    int command_len, proxy_len;
+    php_stream *stream;
+
+    if (mmc->proxy) {
+        stream = mmc->proxy->stream;
+        proxy_len = mmc->proxy_str_len;
+    } else {
+        stream = mmc->stream;
+        proxy_len = 0;
+    }
+
+	php_netstream_data_t *sock = (php_netstream_data_t*)stream->abstract;
 
 	if (!mmc || !cmd) {
 		return -1;
@@ -1172,17 +1232,20 @@ static int mmc_sendcmd(mmc_t *mmc, const char *cmd, int cmdlen TSRMLS_DC) /* {{{
 
 	MMC_DEBUG(("mmc_sendcmd: sending command '%s'", cmd));
 
-	command = emalloc(cmdlen + sizeof("\r\n"));
-	memcpy(command, cmd, cmdlen);
-	memcpy(command + cmdlen, "\r\n", sizeof("\r\n") - 1);
-	command_len = cmdlen + sizeof("\r\n") - 1;
+    command = emalloc(proxy_len + cmdlen + sizeof("\r\n"));
+    if (proxy_len) {
+        memcpy(command, mmc->proxy_str, proxy_len);
+    }
+    memcpy(command + proxy_len, cmd, cmdlen);
+    memcpy(command + proxy_len + cmdlen, "\r\n", sizeof("\r\n") - 1);
+    command_len = proxy_len + cmdlen + sizeof("\r\n") - 1;
 	command[command_len] = '\0';
 
 	if (mmc->timeoutms > 1) {
 		sock->timeout = _convert_timeoutms_to_ts(mmc->timeoutms);
 	}
 
-	if (php_stream_write(mmc->stream, command, command_len) != command_len) {
+	if (php_stream_write(stream, command, command_len) != command_len) {
 		mmc_server_seterror(mmc, "Failed writing command to stream", 0);
 		efree(command);
 		return -1;
@@ -1427,6 +1490,7 @@ static int mmc_read_value(mmc_t *mmc, char **key, int *key_len, char **value, in
 {
 	char *data;
 	int response_len, data_len, i, size;
+    php_stream *stream = mmc->proxy? mmc->proxy->stream: mmc->stream;
 
 	/* read "VALUE <key> <flags> <bytes>\r\n" header line */
 	if ((response_len = mmc_readline(mmc TSRMLS_CC)) < 0) {
@@ -1449,7 +1513,7 @@ static int mmc_read_value(mmc_t *mmc, char **key, int *key_len, char **value, in
 	data = emalloc(data_len + 3);
 
 	for (i=0; i<data_len+2; i+=size) {
-		if ((size = php_stream_read(mmc->stream, data + i, data_len + 2 - i)) == 0) {
+		if ((size = php_stream_read(stream, data + i, data_len + 2 - i)) == 0) {
 			mmc_server_seterror(mmc, "Failed reading value response body", 0);
 			if (key) {
 				efree(*key);
@@ -1920,8 +1984,9 @@ static void php_mmc_connect (INTERNAL_FUNCTION_PARAMETERS, int persistent) /* {{
 {
 	zval **connection, *mmc_object = getThis();
 	mmc_t *mmc = NULL;
+	mmc_t *proxy = NULL;
 	mmc_pool_t *pool;
-	int resource_type, host_len, errnum = 0, list_id;
+	int resource_type, host_len, errnum = 0, list_id, failed = 0;
 	char *host, *error_string = NULL;
 	long port = MEMCACHE_G(default_port), timeout = MMC_DEFAULT_TIMEOUT, timeoutms = 0;
 
@@ -1945,11 +2010,30 @@ static void php_mmc_connect (INTERNAL_FUNCTION_PARAMETERS, int persistent) /* {{
 	mmc->timeout = timeout;
 	mmc->connect_timeoutms = timeoutms;
 
-	if (!mmc_open(mmc, 1, &error_string, &errnum TSRMLS_CC)) {
+    failed = 0;
+    if (MEMCACHE_G(proxy_enabled)) {
+        mmc->proxy = mmc_get_proxy(TSRMLS_CC);
+        if (mmc->proxy == NULL) {
+            failed = 1;
+        } else {
+            failed = (mmc_get_version(mmc TSRMLS_CC) == NULL)? 1: 0;
+        }
+    } 
+    
+    if (!failed && mmc->proxy == NULL) {
+        failed = mmc_open(mmc, 1, &error_string, &errnum TSRMLS_CC)? 0: 1;
+    } else {
+        mmc->proxy = NULL;
+    }
+
+	if (failed) {
 		php_error_docref(NULL TSRMLS_CC, E_WARNING, "Can't connect to %s:%ld, %s (%d)", host, port, error_string ? error_string : "Unknown error", errnum);
 		if (!persistent) {
 			mmc_server_free(mmc TSRMLS_CC);
-		}
+        } else {
+        	mmc_server_sleep(mmc TSRMLS_CC);
+        }
+ 
 		if (error_string) {
 			efree(error_string);
 		}
@@ -1983,6 +2067,44 @@ static void php_mmc_connect (INTERNAL_FUNCTION_PARAMETERS, int persistent) /* {{
 		add_property_resource(mmc_object, "connection", list_id);
 		RETURN_TRUE;
 	}
+}
+/* }}} */
+
+mmc_t *mmc_get_proxy(TSRMLS_DC) /* {{{ */
+{
+	char *host, *error_string = NULL;
+    int host_len, timeout = 1000;
+    long port;
+    int errnum = 0;
+    mmc_t *mmc;
+
+    if (!MEMCACHE_G(proxy_enabled)) return NULL;
+
+    host = MEMCACHE_G(proxy_host);
+    port = MEMCACHE_G(proxy_port);
+    host_len = MEMCACHE_G(proxy_hostlen);
+
+    if (!host) return NULL;
+    /*if (MEMCACHE_G(in_multi)) {
+       mmc = mmc_server_new(host, host_len, port, 0, timeout, MMC_DEFAULT_RETRY TSRMLS_CC);
+        mmc->next = MEMCACHE_G(temp_proxy_list);
+        MEMCACHE_G(temp_proxy_list) = mmc;
+    } else { */
+       mmc = mmc_find_persistent(host, host_len, port, timeout, 0 TSRMLS_CC);
+    //}
+
+   if (!mmc_open(mmc, 1, &error_string, &errnum TSRMLS_CC)) {
+       php_error_docref(NULL TSRMLS_CC, E_WARNING, "Can't connect to mc proxy: %s:%ld, %s (%d)", host, port, error_string ? error_string : "Unknown error", errnum);
+       mmc_server_sleep(mmc TSRMLS_CC);
+
+       if (error_string) {
+           efree(error_string);
+       }
+
+        mmc = NULL;
+   }
+
+   return mmc;
 }
 /* }}} */
 

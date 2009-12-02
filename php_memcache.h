@@ -68,7 +68,7 @@ PHP_FUNCTION(memcache_setoptimeout);
 #define MMC_BUF_SIZE 4096
 #define MMC_SERIALIZED 1
 #define MMC_COMPRESSED 2
-#define MMC_DEFAULT_TIMEOUT 1				/* seconds */
+#define MMC_DEFAULT_TIMEOUT 1000			/* milli seconds */
 #define MMC_KEY_MAX_SIZE 250				/* stoled from memcached sources =) */
 #define MMC_DEFAULT_RETRY 15 				/* retry failed server after x seconds */
 #define MMC_DEFAULT_SAVINGS 0.2				/* minimum 20% savings for compression to be used */
@@ -95,6 +95,8 @@ typedef struct mmc {
 	char					inbuf[MMC_BUF_SIZE];
 	smart_str				outbuf;
 	char					*host;
+	char					*proxy_str;
+	int 					proxy_str_len;
 	unsigned short			port;
 	long					timeout;
 	long					timeoutms; /* takes precedence over timeout */
@@ -107,6 +109,7 @@ typedef struct mmc {
 	int						errnum;					/* last error code */
 	zval					*failure_callback;
 	zend_bool				in_free;
+	struct mmc				*proxy;
 } mmc_t;
 
 /* hashing strategy */
@@ -153,6 +156,11 @@ ZEND_BEGIN_MODULE_GLOBALS(memcache)
 	long hash_strategy;
 	long hash_function;
 	long default_timeout_ms;
+    zend_bool tcp_nodelay;
+    zend_bool proxy_enabled;
+    char *proxy_host;
+    long proxy_port;
+    int proxy_hostlen;
 ZEND_END_MODULE_GLOBALS(memcache)
 
 #if (PHP_MAJOR_VERSION == 5) && (PHP_MINOR_VERSION >= 3)
@@ -177,6 +185,8 @@ int mmc_pool_store(mmc_pool_t *, const char *, int, const char *, int, int, int,
 int mmc_open(mmc_t *, int, char **, int * TSRMLS_DC);
 int mmc_exec_retrieval_cmd(mmc_pool_t *, const char *, int, zval **, zval * TSRMLS_DC);
 int mmc_delete(mmc_t *, const char *, int, int TSRMLS_DC);
+mmc_t *mmc_get_proxy(TSRMLS_DC);
+void mmc_server_disconnect(mmc_t *mmc TSRMLS_DC);
 
 /* session handler struct */
 #if HAVE_MEMCACHE_SESSION

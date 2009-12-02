@@ -1,3 +1,36 @@
+Zynga memcached module for PHP
+------------------------------
+Added support for memcache connection multiplexer - mcmux
+
+The original PHP memcache module is changed in such a way that if 
+mcmux is enabled, instead of directly connecting to the memcache 
+server, all memcache connections are proxied through mcmux. 
+The client (php memcache module) sends the ip address and port of the 
+memcache server along with each request so that mcmux can allot a 
+connection from a pool of connections that it maintains per memcache 
+server. The protocol between mcmux and the client is a modified version 
+of the ascii memcache protocol.
+
+Three new ini settings are added to the memcache module to enable mcmux:
+
+memcache.proxy_enabled = 1/0 - switches proxy support on/off
+memcache.proxy_host = hostname_of_mcmux or unix:///path/to/unixsocket
+memcache.proxy_port = port_of_mcmux or 0 if unix socket
+
+If proxy support is disabled (proxy_enabled == 0), the module behaves 
+exactly same as the OOB php memcache plugin. If it is enabled but if the 
+proxy is not reachable, it prints out a warning in the log file and 
+returns connection error.
+
+Building:
+
+    Make sure php-devel and php-pear packages are installed
+    run ./build-rpm.sh for creating the rpm
+
+
+In case of issues/queries, contact Jayesh Jose <jjose@zynga.com>
+
+
 memcached module for PHP
 ------------------------
 This module requires zlib library, used for on-the-fly data (de)compression.
