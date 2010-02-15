@@ -229,6 +229,7 @@ PHP_INI_BEGIN()
    STD_PHP_INI_ENTRY("memcache.proxy_enabled",     "0",    PHP_INI_ALL, OnUpdateBool,  proxy_enabled,  zend_memcache_globals,  memcache_globals)
    STD_PHP_INI_ENTRY("memcache.proxy_host",        NULL,   PHP_INI_ALL, OnUpdateProxyHost, proxy_host, zend_memcache_globals,  memcache_globals)
    STD_PHP_INI_ENTRY("memcache.proxy_port",        "0",    PHP_INI_ALL, OnUpdateLong,  proxy_port, zend_memcache_globals,  memcache_globals)
+   STD_PHP_INI_ENTRY("memcache.connection_retry_count",        "0",    PHP_INI_ALL, OnUpdateLong,  connection_retry_count, zend_memcache_globals,  memcache_globals)
 PHP_INI_END()
 /* }}} */
 
@@ -277,6 +278,7 @@ static void php_memcache_init_globals(zend_memcache_globals *memcache_globals_p 
 	MEMCACHE_G(proxy_host)        = NULL;
 	MEMCACHE_G(proxy_hostlen)     = 0;
 	MEMCACHE_G(proxy_port)        = 0;
+	MEMCACHE_G(connection_retry_count) = 0;
 }
 /* }}} */
 
@@ -957,7 +959,7 @@ static int _mmc_open(mmc_t *mmc, char **error_string, int *errnum TSRMLS_DC) /* 
 	struct timeval tv;
 	char *hostname = NULL, *hash_key = NULL, *errstr = NULL;
 	int	hostname_len, err = 0;
-
+	int ntries = MEMCACHE_G(connection_retry_count);        
 	/* close open stream */
 	if (mmc->stream != NULL) {
 		mmc_server_disconnect(mmc TSRMLS_CC);
@@ -980,14 +982,15 @@ static int _mmc_open(mmc_t *mmc, char **error_string, int *errnum TSRMLS_DC) /* 
 		spprintf(&hash_key, 0, "memcache:%s", hostname);
 	}
 
+	do {
 #if PHP_API_VERSION > 20020918
-	mmc->stream = php_stream_xport_create( hostname, hostname_len,
+		mmc->stream = php_stream_xport_create( hostname, hostname_len,
 										   ENFORCE_SAFE_MODE | REPORT_ERRORS,
 										   STREAM_XPORT_CLIENT | STREAM_XPORT_CONNECT,
 										   hash_key, &tv, NULL, &errstr, &err);
 #else
-	if (mmc->persistent) {
-		switch(php_stream_from_persistent_id(hash_key, &(mmc->stream) TSRMLS_CC)) {
+		if (mmc->persistent) {
+			switch(php_stream_from_persistent_id(hash_key, &(mmc->stream) TSRMLS_CC)) {
 			case PHP_STREAM_PERSISTENT_SUCCESS:
 				if (php_stream_eof(mmc->stream)) {
 					php_stream_pclose(mmc->stream);
@@ -996,15 +999,17 @@ static int _mmc_open(mmc_t *mmc, char **error_string, int *errnum TSRMLS_DC) /* 
 				}
 			case PHP_STREAM_PERSISTENT_FAILURE:
 				break;
+			}
 		}
-	}
 
-	if (!mmc->stream) {
-		int socktype = SOCK_STREAM;
-		mmc->stream = php_stream_sock_open_host(mmc->host, mmc->port, socktype, &tv, hash_key);
-	}
+		//This retries in case of connection failure based on ntries.
+		if (!mmc->stream) {
+			int socktype = SOCK_STREAM;
+			mmc->stream = php_stream_sock_open_host(mmc->host, mmc->port, socktype, &tv, hash_key);
+	  	}
 
 #endif
+	} while (!mmc->stream && ntries-- > 0);
 
 	efree(hostname);
 	if (mmc->persistent) {

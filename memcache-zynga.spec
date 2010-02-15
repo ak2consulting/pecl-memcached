@@ -8,7 +8,7 @@
 
 Summary:      Memcached extension with custom changes for zynga
 Name:         php-pecl-memcache-zynga
-Version:      2.2.5.3
+Version:      2.2.5.4
 Release:      %{?php_version}
 License:      PHP
 Group:        Development/Languages
@@ -100,6 +100,8 @@ extension=%{module_name}.so
 ;session.save_handler=memcache
 ; Defines a comma separated of server urls to use for session storage
 ;session.save_path="tcp://localhost:11211?persistent=1&weight=1&timeout=1&retry_interval=15"
+; Option to enable the number of retries on a persistent connection failure
+;memcache.connection_retry_count=0
 EOF
 
 # Install XML package description

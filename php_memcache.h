@@ -161,6 +161,7 @@ ZEND_BEGIN_MODULE_GLOBALS(memcache)
     char *proxy_host;
     long proxy_port;
     int proxy_hostlen;
+	int connection_retry_count;
 ZEND_END_MODULE_GLOBALS(memcache)
 
 #if (PHP_MAJOR_VERSION == 5) && (PHP_MINOR_VERSION >= 3)
