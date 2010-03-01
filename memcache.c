@@ -517,6 +517,10 @@ static void mmc_server_received_error(mmc_t *mmc, int response_len)  /* {{{ */
 		mmc->inbuf[response_len < MMC_BUF_SIZE - 1 ? response_len : MMC_BUF_SIZE - 1] = '\0';
 		mmc_server_seterror(mmc, mmc->inbuf, 0);
 	}
+	else if (mmc_str_left(mmc->inbuf, "NOT_FOUND", response_len, sizeof("NOT_FOUND") - 1)) 
+	{
+		mmc_server_seterror(mmc, "Key does not exist or the Queue specified is not a valid one", 0);
+	}
 	else {
 		mmc_server_seterror(mmc, "Received malformed response", 0);
 	}
@@ -983,6 +987,11 @@ static int _mmc_open(mmc_t *mmc, char **error_string, int *errnum TSRMLS_DC) /* 
 	}
 
 	do {
+		if (ntries < MEMCACHE_G(connection_retry_count)) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, 
+			"Server %s (tcp %d) failed with: Connection Error. Retry attempt #%d", 
+			mmc->host, mmc->port, MEMCACHE_G(connection_retry_count) - ntries);
+		}
 #if PHP_API_VERSION > 20020918
 		mmc->stream = php_stream_xport_create( hostname, hostname_len,
 										   ENFORCE_SAFE_MODE | REPORT_ERRORS,

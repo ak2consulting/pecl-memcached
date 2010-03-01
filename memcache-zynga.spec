@@ -8,7 +8,7 @@
 
 Summary:      Memcached extension with custom changes for zynga
 Name:         php-pecl-memcache-zynga
-Version:      2.2.5.4
+Version:      2.2.5.5
 Release:      %{?php_version}
 License:      PHP
 Group:        Development/Languages
@@ -55,6 +55,7 @@ find . -type f -exec chmod -x {} \;
 %build
 cd %{pecl_name}-%{version}
 phpize
+chmod +x ./configure
 %configure
 %{__make} %{?_smp_mflags}
 
@@ -100,14 +101,15 @@ extension=%{module_name}.so
 ;session.save_handler=memcache
 ; Defines a comma separated of server urls to use for session storage
 ;session.save_path="tcp://localhost:11211?persistent=1&weight=1&timeout=1&retry_interval=15"
-; Option to enable the number of retries on a persistent connection failure
+; Option to enable the number of retries on a persistent connection
 ;memcache.connection_retry_count=0
 EOF
 
 # Install XML package description
 # use 'name' rather than 'pecl_name' to avoid conflict with pear extensions
 %{__mkdir_p} %{buildroot}%{pecl_xmldir}
-%{__install} -m 644 ../package.xml %{buildroot}%{pecl_xmldir}/%{name}.xml
+#%{__install} -m 644 ../package.xml %{buildroot}%{pecl_xmldir}/%{name}.xml
+%{__install} -m 644 package.xml %{buildroot}%{pecl_xmldir}/%{name}.xml
 
 
 %clean
@@ -138,6 +140,13 @@ fi
 
 
 %changelog
+* Thu Feb 25 2010 Prashun Purkayastha <ppurkayastha@zynga.com> 2.2.5.5-1
+- Added a display message for the NOT_FOUND error
+
+* Tue Feb 16 2010 Prashun Purkayastha <ppurkayastha@zynga.com> 2.2.5.4-1
+- Added INI_SET option to retry with "memcache.connection_retry_count" on a 
+- failed set or get operation on a persistent connection
+
 * Wed Nov 18 2009 Jayesh Jose <jjose@zynga.com> 2.2.5.3-1
 - Disabled fall back to direct mc connection 
 
