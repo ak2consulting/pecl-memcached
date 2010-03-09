@@ -45,6 +45,9 @@
 #include "php_memcache.h"
 #include "memcache_queue.h"
 
+#include <sys/types.h>
+#include <unistd.h>
+
 #ifndef ZEND_ENGINE_2
 #define OnUpdateLong OnUpdateInt
 #endif
@@ -983,7 +986,7 @@ static int _mmc_open(mmc_t *mmc, char **error_string, int *errnum TSRMLS_DC) /* 
 	}
 
 	if (mmc->persistent) {
-		spprintf(&hash_key, 0, "memcache:%s", hostname);
+		spprintf(&hash_key, 0, "memcache:%d:%s", getpid(), hostname);
 	}
 
 	do {
@@ -2345,7 +2348,7 @@ mmc_t *mmc_find_persistent(char *host, int host_len, int port, int timeout, int 
 	int hash_key_len;
 
 	MMC_DEBUG(("mmc_find_persistent: seeking for persistent connection"));
-	hash_key_len = spprintf(&hash_key, 0, "mmc_connect___%s:%d", host, port);
+	hash_key_len = spprintf(&hash_key, 0, "mmc_connect___%d:%s:%d", getpid(), host, port);
 
 	if (zend_hash_find(&EG(persistent_list), hash_key, hash_key_len+1, (void **) &le) == FAILURE) {
 		zend_rsrc_list_entry new_le;
