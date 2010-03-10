@@ -55,6 +55,7 @@
 /* True global resources - no need for thread safety here */
 static int le_memcache_pool, le_pmemcache;
 static zend_class_entry *memcache_class_entry_ptr;
+static int memcache_lzo_enabled;
 
 ZEND_DECLARE_MODULE_GLOBALS(memcache)
 
@@ -209,6 +210,20 @@ static PHP_INI_MH(OnUpdateDefaultTimeout) /* {{{ */
 }
 /* }}} */
 
+static PHP_INI_MH(OnUpdateCompressionLevel) /* {{{ */
+{
+	long int lval;
+
+	lval = strtol(new_value, NULL, 10);
+	if (lval < 0 || lval > 9) {
+		php_error_docref(NULL TSRMLS_CC, E_WARNING, "memcache.compression_level must be >= 0 and <= 9 ", new_value);
+		return FAILURE;
+	}
+	MEMCACHE_G(compression_level) = lval;
+	return SUCCESS;
+}
+/* }}} */
+
 static PHP_INI_MH(OnUpdateProxyHost) /* {{{ */
 {
     if (new_value != NULL) {
@@ -228,6 +243,7 @@ PHP_INI_BEGIN()
 	STD_PHP_INI_ENTRY("memcache.hash_strategy",		"standard",	PHP_INI_ALL, OnUpdateHashStrategy,	hash_strategy,	zend_memcache_globals,	memcache_globals)
 	STD_PHP_INI_ENTRY("memcache.hash_function",		"crc32",	PHP_INI_ALL, OnUpdateHashFunction,	hash_function,	zend_memcache_globals,	memcache_globals)
 	STD_PHP_INI_ENTRY("memcache.default_timeout_ms",	"1000",	PHP_INI_ALL, OnUpdateDefaultTimeout,	default_timeout_ms,	zend_memcache_globals,	memcache_globals)
+	STD_PHP_INI_ENTRY("memcache.compression_level",	"0",	PHP_INI_ALL, OnUpdateCompressionLevel,	compression_level,	zend_memcache_globals,	memcache_globals)
    STD_PHP_INI_ENTRY("memcache.tcp_nodelay",       "1",        PHP_INI_ALL, OnUpdateBool, tcp_nodelay,     zend_memcache_globals,  memcache_globals)
    STD_PHP_INI_ENTRY("memcache.proxy_enabled",     "0",    PHP_INI_ALL, OnUpdateBool,  proxy_enabled,  zend_memcache_globals,  memcache_globals)
    STD_PHP_INI_ENTRY("memcache.proxy_host",        NULL,   PHP_INI_ALL, OnUpdateProxyHost, proxy_host, zend_memcache_globals,  memcache_globals)
@@ -243,8 +259,8 @@ static void _mmc_pserver_list_dtor(zend_rsrc_list_entry * TSRMLS_DC);
 static void mmc_server_free(mmc_t * TSRMLS_DC);
 static int mmc_server_store(mmc_t *, const char *, int TSRMLS_DC);
 
-static int mmc_compress(char **, unsigned long *, const char *, int TSRMLS_DC);
-static int mmc_uncompress(char **, unsigned long *, const char *, int);
+static int mmc_compress(char **, unsigned long *, const char *, int, int TSRMLS_DC);
+static int mmc_uncompress(char **, unsigned long *, const char *, int, int);
 static int mmc_get_pool(zval *, mmc_pool_t ** TSRMLS_DC);
 static int mmc_readline(mmc_t * TSRMLS_DC);
 static char * mmc_get_version(mmc_t * TSRMLS_DC);
@@ -272,7 +288,7 @@ static void php_memcache_init_globals(zend_memcache_globals *memcache_globals_p 
 {
 	MEMCACHE_G(debug_mode)		  = 0;
 	MEMCACHE_G(num_persistent)	  = 0;
-	MEMCACHE_G(compression_level) = Z_DEFAULT_COMPRESSION;
+	MEMCACHE_G(compression_level) = 0;
 	MEMCACHE_G(hash_strategy)	  = MMC_STANDARD_HASH;
 	MEMCACHE_G(hash_function)	  = MMC_HASH_CRC32;
 	MEMCACHE_G(default_timeout_ms)= (MMC_DEFAULT_TIMEOUT) * 1000;
@@ -303,6 +319,7 @@ PHP_MINIT_FUNCTION(memcache)
 #endif
 
 	REGISTER_LONG_CONSTANT("MEMCACHE_COMPRESSED", MMC_COMPRESSED, CONST_CS | CONST_PERSISTENT);
+	REGISTER_LONG_CONSTANT("MEMCACHE_COMPRESSED_LZO", MMC_COMPRESSED_LZO, CONST_CS | CONST_PERSISTENT);
 	REGISTER_INI_ENTRIES();
 
 #if HAVE_MEMCACHE_SESSION
@@ -311,7 +328,7 @@ PHP_MINIT_FUNCTION(memcache)
 #else
 	REGISTER_LONG_CONSTANT("MEMCACHE_HAVE_SESSION", 0, CONST_CS | CONST_PERSISTENT);
 #endif
-
+    memcache_lzo_enabled = (lzo_init() == LZO_E_OK)? 1: 0;
 	return SUCCESS;
 }
 /* }}} */
@@ -345,6 +362,7 @@ PHP_MINFO_FUNCTION(memcache)
 	php_info_print_table_start();
 	php_info_print_table_header(2, "memcache support", "enabled");
 	php_info_print_table_row(2, "Active persistent connections", buf);
+	php_info_print_table_row(2, "LZO compression", memcache_lzo_enabled? "enabled": "disabled");
 	php_info_print_table_row(2, "Version", PHP_MEMCACHE_VERSION);
 	php_info_print_table_row(2, "Revision", "$Revision: 1.111 $");
 	php_info_print_table_end();
@@ -803,14 +821,20 @@ int mmc_pool_store(mmc_pool_t *pool, const char *command, int command_len, const
 	}
 
 	/* autocompress large values */
-	if (pool->compress_threshold && value_len >= pool->compress_threshold) {
-		flags |= MMC_COMPRESSED;
+	if (pool->compress_threshold && value_len >= pool->compress_threshold && 
+		!(flags & (MMC_COMPRESSED | MMC_COMPRESSED_LZO))) {
+		flags |= (MEMCACHE_G(compression_level) > 0)? MMC_COMPRESSED: MMC_COMPRESSED_LZO;
 	}
 
-	if (flags & MMC_COMPRESSED) {
+	if ((flags & MMC_COMPRESSED) || (flags & MMC_COMPRESSED_LZO)) {
 		unsigned long data_len;
 
-		if (!mmc_compress(&data, &data_len, value, value_len TSRMLS_CC)) {
+    	if (!memcache_lzo_enabled) {
+			flags &= ~MMC_COMPRESSED_LZO;
+			flags |= MMC_COMPRESSED;
+		}
+
+		if (!mmc_compress(&data, &data_len, value, value_len, flags TSRMLS_CC)) {
 			/* mmc_server_seterror(mmc, "Failed to compress data", 0); */
 			return -1;
 		}
@@ -821,7 +845,7 @@ int mmc_pool_store(mmc_pool_t *pool, const char *command, int command_len, const
 			value_len = data_len;
 		}
 		else {
-			flags &= ~MMC_COMPRESSED;
+			flags &= ~(MMC_COMPRESSED | MMC_COMPRESSED_LZO);
 			efree(data);
 			data = NULL;
 		}
@@ -873,22 +897,32 @@ int mmc_pool_store(mmc_pool_t *pool, const char *command, int command_len, const
 }
 /* }}} */
 
-static int mmc_compress(char **result, unsigned long *result_len, const char *data, int data_len TSRMLS_DC) /* {{{ */
+static int mmc_compress(char **result, unsigned long *result_len, const char *data, int data_len, int flags TSRMLS_DC) /* {{{ */
 {
 	int status, level = MEMCACHE_G(compression_level);
 
-	*result_len = data_len + (data_len / 1000) + 25 + 1; /* some magic from zlib.c */
+	// *result_len = data_len + (data_len / 1000) + 25 + 1; /* some magic from zlib.c */
+	*result_len = data_len + (data_len / 16) + 64 + 3; /* worst-case expansion for lzo */
 	*result = (char *) emalloc(*result_len);
 
 	if (!*result) {
 		return 0;
 	}
 
-	if (level >= 0) {
-		status = compress2((unsigned char *) *result, result_len, (unsigned const char *) data, data_len, level);
+    if (flags & MMC_COMPRESSED) {
+		if (level >= 0) {
+			status = compress2((unsigned char *) *result, result_len, (unsigned const char *) data, data_len, level);
+		} else {
+			status = compress((unsigned char *) *result, result_len, (unsigned const char *) data, data_len);
+		}
 	} else {
-		status = compress((unsigned char *) *result, result_len, (unsigned const char *) data, data_len);
-	}
+    	status = lzo1x_1_compress(data, data_len, *result, result_len, MEMCACHE_G(lzo_wmem));
+		switch (status) {
+			case LZO_E_OK: status = Z_OK; break;
+			case LZO_E_OUTPUT_OVERRUN: status = Z_BUF_ERROR; break;
+			default: status = Z_DATA_ERROR;
+        }
+    }
 
 	if (status == Z_OK) {
 		*result = erealloc(*result, *result_len + 1);
@@ -916,7 +950,7 @@ static int mmc_compress(char **result, unsigned long *result_len, const char *da
 }
 /* }}}*/
 
-static int mmc_uncompress(char **result, unsigned long *result_len, const char *data, int data_len) /* {{{ */
+static int mmc_uncompress(char **result, unsigned long *result_len, const char *data, int data_len, int flags) /* {{{ */
 {
 	int status;
 	unsigned int factor = 1, maxfactor = 16;
@@ -925,7 +959,14 @@ static int mmc_uncompress(char **result, unsigned long *result_len, const char *
 	do {
 		*result_len = (unsigned long)data_len * (1 << factor++);
 		*result = (char *) erealloc(tmp1, *result_len);
-		status = uncompress((unsigned char *) *result, result_len, (unsigned const char *) data, data_len);
+		if (flags & MMC_COMPRESSED) {
+			status = uncompress((unsigned char *) *result, result_len, (unsigned const char *) data, data_len);
+		} else {
+			status = lzo1x_decompress_safe(data, data_len, *result, result_len, NULL);
+			if (status == LZO_E_OUTPUT_OVERRUN) status = Z_BUF_ERROR;
+			else if (status == LZO_E_OK) status = Z_OK;
+			else status = Z_DATA_ERROR;
+		}
 		tmp1 = *result;
 	} while (status == Z_BUF_ERROR && factor < maxfactor);
 
@@ -1542,11 +1583,21 @@ static int mmc_read_value(mmc_t *mmc, char **key, int *key_len, char **value, in
 
 	data[data_len] = '\0';
 	
-	if ((*flags & MMC_COMPRESSED) && data_len > 0) {
+    if (!memcache_lzo_enabled && (*flags & MMC_COMPRESSED_LZO) && data_len > 0) {
+		mmc_server_seterror(mmc, "Failed to uncompress data - lzo init failed", 0);
+		if (key) {
+			efree(*key);
+		}
+		efree(data);
+		php_error_docref(NULL TSRMLS_CC, E_NOTICE, "unable to uncompress data - lzo init failed");
+		return 0;
+	}
+
+	if (((*flags & MMC_COMPRESSED) || (*flags & MMC_COMPRESSED_LZO)) && data_len > 0) {
 		char *result_data;
 		unsigned long result_len = 0;
 
-		if (!mmc_uncompress(&result_data, &result_len, data, data_len)) {
+		if (!mmc_uncompress(&result_data, &result_len, data, data_len, *flags)) {
 			mmc_server_seterror(mmc, "Failed to uncompress data", 0);
 			if (key) {
 				efree(*key);
@@ -1940,8 +1991,7 @@ static void php_mmc_store(INTERNAL_FUNCTION_PARAMETERS, char *command, int comma
 				pool, command, command_len, key_tmp, key_tmp_len, flags, expire, 
 				buf.c, buf.len TSRMLS_CC);
 		}
-	}
-
+	} 
 	if (flags & MMC_SERIALIZED) {
 		smart_str_free(&buf);
 	}

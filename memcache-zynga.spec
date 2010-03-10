@@ -8,7 +8,7 @@
 
 Summary:      Memcached extension with custom changes for zynga
 Name:         php-pecl-memcache-zynga
-Version:      2.2.5.6
+Version:      2.2.6.0
 Release:      %{?php_version}
 License:      PHP
 Group:        Development/Languages
@@ -95,6 +95,11 @@ extension=%{module_name}.so
 ; Proxy port. For unix domain sockets, give 0 
 ;memcache.proxy_port=0
 
+; Compression level - ignored unless compression threshold is set on the memcache pool
+; 0: use LZO compression
+; 1 - 9: use Zlib compression
+;memcache.compression_level=0
+
 ; Options to use the memcache session handler
 
 ; Use memcache as a session handler
@@ -140,6 +145,9 @@ fi
 
 
 %changelog
+* Wed Mar 10 2010 Jayesh Jose <jjose@zynga.com> 2.2.6.0-1
+- Adding LZO compression support
+
 * Thu Feb 25 2010 Prashun Purkayastha <ppurkayastha@zynga.com> 2.2.5.5-1
 - Added a display message for the NOT_FOUND error
 

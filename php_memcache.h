@@ -36,6 +36,7 @@ extern zend_module_entry memcache_module_entry;
 #endif
 
 #include "ext/standard/php_smart_str_public.h"
+#include "minilzo.h"
 
 PHP_MINIT_FUNCTION(memcache);
 PHP_MSHUTDOWN_FUNCTION(memcache);
@@ -63,11 +64,12 @@ PHP_FUNCTION(memcache_close);
 PHP_FUNCTION(memcache_flush);
 PHP_FUNCTION(memcache_setoptimeout);
 
-#define PHP_MEMCACHE_VERSION "2.2.5"
+#define PHP_MEMCACHE_VERSION "2.2.6"
 
 #define MMC_BUF_SIZE 4096
 #define MMC_SERIALIZED 1
 #define MMC_COMPRESSED 2
+#define MMC_COMPRESSED_LZO 4
 #define MMC_DEFAULT_TIMEOUT 1000			/* milli seconds */
 #define MMC_KEY_MAX_SIZE 250				/* stoled from memcached sources =) */
 #define MMC_DEFAULT_RETRY 15 				/* retry failed server after x seconds */
@@ -149,6 +151,7 @@ ZEND_BEGIN_MODULE_GLOBALS(memcache)
 	long debug_mode;
 	long default_port;
 	long num_persistent;
+	zend_bool lzo_enabled;
 	long compression_level;
 	long allow_failover;
 	long chunk_size;
@@ -162,6 +165,7 @@ ZEND_BEGIN_MODULE_GLOBALS(memcache)
     long proxy_port;
     int proxy_hostlen;
 	int connection_retry_count;
+    lzo_align_t __LZO_MMODEL lzo_wmem[ ((LZO1X_1_MEM_COMPRESS) + (sizeof(lzo_align_t) - 1)) / sizeof(lzo_align_t) ];
 ZEND_END_MODULE_GLOBALS(memcache)
 
 #if (PHP_MAJOR_VERSION == 5) && (PHP_MINOR_VERSION >= 3)

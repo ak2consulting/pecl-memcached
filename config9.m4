@@ -87,12 +87,24 @@ if test "$PHP_MEMCACHE" != "no"; then
     fi
   fi
 
+  AC_CHECK_TYPE(ptrdiff_t,long)
+  AC_TYPE_SIZE_T
+  AC_CHECK_SIZEOF(short)
+  AC_CHECK_SIZEOF(int)
+  AC_CHECK_SIZEOF(long)
+  AC_CHECK_SIZEOF(long long)
+  AC_CHECK_SIZEOF(__int64)
+  AC_CHECK_SIZEOF(void *)
+  AC_CHECK_SIZEOF(size_t)
+  AC_CHECK_SIZEOF(ptrdiff_t)
+  AC_C_CONST
+
   AC_MSG_CHECKING([for memcache session support])
   if test "$PHP_MEMCACHE_SESSION" != "no"; then
     AC_MSG_RESULT([enabled])
     AC_DEFINE(HAVE_MEMCACHE_SESSION,1,[Whether memcache session handler is enabled])
     AC_DEFINE(HAVE_MEMCACHE,1,[Whether you want memcache support])
-    PHP_NEW_EXTENSION(memcache, memcache.c memcache_queue.c memcache_standard_hash.c memcache_consistent_hash.c memcache_session.c, $ext_shared,,-I$session_inc_path)
+    PHP_NEW_EXTENSION(memcache, memcache.c memcache_queue.c memcache_standard_hash.c memcache_consistent_hash.c memcache_session.c minilzo/minilzo.c, $ext_shared,,-I$session_inc_path -I$abs_srcdir/minilzo -DMINILZO_HAVE_CONFIG_H)
     ifdef([PHP_ADD_EXTENSION_DEP],
     [
       PHP_ADD_EXTENSION_DEP(memcache, session)
@@ -101,6 +113,7 @@ if test "$PHP_MEMCACHE" != "no"; then
     AC_MSG_RESULT([disabled])
     AC_DEFINE(HAVE_MEMCACHE,1,[Whether you want memcache support])
     PHP_NEW_EXTENSION(memcache, memcache.c memcache_queue.c memcache_standard_hash.c memcache_consistent_hash.c, $ext_shared)
+    PHP_NEW_EXTENSION(memcache, memcache.c memcache_queue.c memcache_standard_hash.c memcache_consistent_hash.c minilzo/minilzo.c, $ext_shared,,-I$abs_srcdir/minilzo -DMINILZO_HAVE_CONFIG_H)
   fi
 
 dnl this is needed to build the extension with phpize and -Wall

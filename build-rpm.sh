@@ -18,7 +18,8 @@ FILES="config9.m4 \
 	build-rpm.sh \
 	xml2changelog \
 	package.xml \
-	memcache-zynga.spec"
+	memcache-zynga.spec \
+	minilzo"
 
 
 specfile=memcache-zynga.spec
