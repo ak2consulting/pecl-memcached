@@ -8,7 +8,7 @@
 
 Summary:      Memcached extension with custom changes for zynga
 Name:         php-pecl-memcache-zynga
-Version:      2.2.6.0
+Version:      2.3.0.1
 Release:      %{?php_version}
 License:      PHP
 Group:        Development/Languages
@@ -100,6 +100,11 @@ extension=%{module_name}.so
 ; 1 - 9: use Zlib compression
 ;memcache.compression_level=0
 
+; Return value of get() on error
+; By default, get() returns FALSE for both error and key miss
+; with null_on_keymiss=1, get returns null for key miss and FALSE for error
+;memcache.null_on_keymiss=0
+
 ; Options to use the memcache session handler
 
 ; Use memcache as a session handler
@@ -145,6 +150,13 @@ fi
 
 
 %changelog
+* Tue Apr 27 2010 Jayesh Jose <jjose@zynga.com> 2.3.0.1-1
+- CAS support added
+- New function, get2 that takes value as a ref param
+
+* Wed Apr 21 2010 Jayesh Jose <jjose@zynga.com> 2.2.7.0-1
+- Support for turning on/off proxy at a Memcache object level
+
 * Wed Mar 10 2010 Jayesh Jose <jjose@zynga.com> 2.2.6.0-1
 - Adding LZO compression support
 

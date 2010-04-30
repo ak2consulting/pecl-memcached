@@ -198,7 +198,7 @@ PS_READ_FUNC(memcache)
 		MAKE_STD_ZVAL(result);
 		ZVAL_NULL(result);
 
-		if (mmc_exec_retrieval_cmd(pool, key_tmp, key_tmp_len, &result, NULL TSRMLS_CC) <= 0 || Z_TYPE_P(result) != IS_STRING) {
+		if (mmc_exec_retrieval_cmd(pool, key_tmp, key_tmp_len, &result, NULL, NULL TSRMLS_CC) <= 0 || Z_TYPE_P(result) != IS_STRING) {
 			zval_ptr_dtor(&result);
 			return FAILURE;
 		}
@@ -227,7 +227,7 @@ PS_WRITE_FUNC(memcache)
 			return FAILURE;
 		}			
 		
-		if (mmc_pool_store(pool, "set", sizeof("set")-1, key_tmp, key_tmp_len, 0, INI_INT("session.gc_maxlifetime"), val, vallen TSRMLS_CC)) {
+		if (mmc_pool_store(pool, "set", sizeof("set")-1, key_tmp, key_tmp_len, 0, INI_INT("session.gc_maxlifetime"), 0, val, vallen TSRMLS_CC)) {
 			return SUCCESS;
 		}
 	}

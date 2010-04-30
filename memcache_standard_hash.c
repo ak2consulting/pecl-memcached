@@ -80,12 +80,12 @@ static int should_failover(mmc_t *mmc, mmc_t *proxy TSRMLS_DC)
 }
 
 
-mmc_t *mmc_standard_find_server(void *s, const char *key, int key_len TSRMLS_DC) /* {{{ */
+mmc_t *mmc_standard_find_server(void *s, const char *key, int key_len, zend_bool use_proxy TSRMLS_DC) /* {{{ */
 {
 	mmc_standard_state_t *state = s;
 	mmc_t *mmc, *proxy = NULL;
 
-    if (MEMCACHE_G(proxy_enabled)) {
+    if (use_proxy) {
         proxy = mmc_get_proxy(TSRMLS_CC);
         if (proxy == NULL) return NULL;
     }

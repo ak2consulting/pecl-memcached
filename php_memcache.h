@@ -53,6 +53,8 @@ PHP_FUNCTION(memcache_add);
 PHP_FUNCTION(memcache_set);
 PHP_FUNCTION(memcache_replace);
 PHP_FUNCTION(memcache_get);
+PHP_FUNCTION(memcache_get2);
+PHP_FUNCTION(memcache_cas);
 PHP_FUNCTION(memcache_delete);
 PHP_FUNCTION(memcache_debug);
 PHP_FUNCTION(memcache_get_stats);
@@ -63,14 +65,16 @@ PHP_FUNCTION(memcache_decrement);
 PHP_FUNCTION(memcache_close);
 PHP_FUNCTION(memcache_flush);
 PHP_FUNCTION(memcache_setoptimeout);
+PHP_FUNCTION(memcache_enable_proxy);
+PHP_FUNCTION(memcache_setproperty);
 
-#define PHP_MEMCACHE_VERSION "2.2.6"
+#define PHP_MEMCACHE_VERSION "2.3.0"
 
 #define MMC_BUF_SIZE 4096
 #define MMC_SERIALIZED 1
 #define MMC_COMPRESSED 2
 #define MMC_COMPRESSED_LZO 4
-#define MMC_DEFAULT_TIMEOUT 1000			/* milli seconds */
+#define MMC_DEFAULT_TIMEOUT 10000			/* milli seconds */
 #define MMC_KEY_MAX_SIZE 250				/* stoled from memcached sources =) */
 #define MMC_DEFAULT_RETRY 15 				/* retry failed server after x seconds */
 #define MMC_DEFAULT_SAVINGS 0.2				/* minimum 20% savings for compression to be used */
@@ -118,11 +122,11 @@ typedef struct mmc {
 typedef unsigned int (*mmc_hash_function)(const char *, int);
 typedef void * (*mmc_hash_create_state)(mmc_hash_function);
 typedef void (*mmc_hash_free_state)(void *);
-typedef mmc_t * (*mmc_hash_find_server)(void *, const char *, int TSRMLS_DC);
+typedef mmc_t * (*mmc_hash_find_server)(void *, const char *, int, zend_bool TSRMLS_DC);
 typedef void (*mmc_hash_add_server)(void *, mmc_t *, unsigned int);
 
 #define mmc_pool_find(pool, key, key_len) \
-	pool->hash->find_server(pool->hash_state, key, key_len)
+	pool->hash->find_server(pool->hash_state, key, key_len, pool->proxy_enabled)
 
 typedef struct mmc_hash {
 	mmc_hash_create_state	create_state;
@@ -140,10 +144,12 @@ typedef struct mmc_pool {
 	int						num_servers;
 	mmc_t					**requests;
 	int						compress_threshold;
+	zend_bool				proxy_enabled;
 	double					min_compress_savings;
 	zend_bool				in_free;
 	mmc_hash_t				*hash;
 	void					*hash_state;
+	zend_bool				false_on_error;
 } mmc_pool_t;
 
 /* our globals */
@@ -161,6 +167,7 @@ ZEND_BEGIN_MODULE_GLOBALS(memcache)
 	long default_timeout_ms;
     zend_bool tcp_nodelay;
     zend_bool proxy_enabled;
+    zend_bool false_on_error;
     char *proxy_host;
     long proxy_port;
     int proxy_hostlen;
@@ -186,9 +193,9 @@ int mmc_prepare_key_ex(const char *, unsigned int, char *, unsigned int * TSRMLS
 mmc_pool_t *mmc_pool_new(TSRMLS_D);
 void mmc_pool_free(mmc_pool_t * TSRMLS_DC);
 void mmc_pool_add(mmc_pool_t *, mmc_t *, unsigned int);
-int mmc_pool_store(mmc_pool_t *, const char *, int, const char *, int, int, int, const char *, int TSRMLS_DC);
+int mmc_pool_store(mmc_pool_t *, const char *, int, const char *, int, int, int, unsigned long , const char *, int TSRMLS_DC);
 int mmc_open(mmc_t *, int, char **, int * TSRMLS_DC);
-int mmc_exec_retrieval_cmd(mmc_pool_t *, const char *, int, zval **, zval * TSRMLS_DC);
+int mmc_exec_retrieval_cmd(mmc_pool_t *, const char *, int, zval **, zval *, zval * TSRMLS_DC);
 int mmc_delete(mmc_t *, const char *, int, int TSRMLS_DC);
 mmc_t *mmc_get_proxy(TSRMLS_DC);
 void mmc_server_disconnect(mmc_t *mmc TSRMLS_DC);
@@ -204,7 +211,7 @@ PS_FUNCS(memcache);
 #endif
 
 /* {{{ macros */
-#if ZEND_DEBUG
+#if ZEND_DEBUG 
 
 void mmc_debug(const char *format, ...);
 
