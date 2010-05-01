@@ -1513,8 +1513,9 @@ static int mmc_exec_retrieval_cmd_multi(mmc_pool_t *pool, zval *keys, zval **ret
 	}
 
 	/* until no retrival errors or all servers have failed */
+	result_status = 0;
 	do {
-		result_status = num_requests = 0;
+		num_requests = 0;
 		zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(keys), &pos);
 
 		/* first pass to build requests for each server */
