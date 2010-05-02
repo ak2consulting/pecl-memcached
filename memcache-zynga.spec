@@ -150,9 +150,10 @@ fi
 
 
 %changelog
-* Sat May 01 2010 Manik Taneja <mtaneja@zynga,com> 2.3.0.2-1
+* Sat May 01 2010 Manik Taneja <mtaneja@zynga.com> 2.3.0.2-1
 - multi-get2 returns with an array of key-status pairs
 - added "non-numeric" return check for incr/decr
+
 * Tue Apr 27 2010 Jayesh Jose <jjose@zynga.com> 2.3.0.1-1
 - CAS support added
 - New function, get2 that takes value as a ref param

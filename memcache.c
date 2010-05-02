@@ -1580,9 +1580,8 @@ static int mmc_exec_retrieval_cmd_multi(
 	}
 
 	/* until no retrival errors or all servers have failed */
-	result_status = 0;
 	do {
-		num_requests = 0;
+		result_status = 0; num_requests = 0;
 		zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(keys), &pos);
 
 		/* first pass to build requests for each server */
@@ -2681,7 +2680,7 @@ PHP_FUNCTION(memcache_replace)
 PHP_FUNCTION(memcache_get2)
 {
 	mmc_pool_t *pool;
-	zval *zkey, *zval, *mmc_object = getThis(), *flags = NULL, *cas = NULL, *status_array;
+	zval *zkey, *zval, *mmc_object = getThis(), *flags = NULL, *cas = NULL;
 	char key[MMC_KEY_MAX_SIZE];
 	unsigned int key_len;
 
@@ -2701,6 +2700,7 @@ PHP_FUNCTION(memcache_get2)
 	}
 
 	zval_dtor(zval);
+	ZVAL_NULL(return_value);
 
 	zend_bool old_false_on_failure = pool->false_on_error;
 	pool->false_on_error = 1;
