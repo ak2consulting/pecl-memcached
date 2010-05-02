@@ -276,11 +276,11 @@ static char * mmc_get_version(mmc_t * TSRMLS_DC);
 static int mmc_str_left(char *, char *, int, int);
 static int mmc_sendcmd(mmc_t *, const char *, int TSRMLS_DC);
 static int mmc_parse_response(mmc_t *mmc, char *, int, char **, int *, int *, unsigned long *, int *);
-static int mmc_exec_retrieval_cmd_multi(mmc_pool_t *, zval *, zval **, zval *, zval * TSRMLS_DC);
+static int mmc_exec_retrieval_cmd_multi(mmc_pool_t *, zval *, zval **, zval **, zval *, zval * TSRMLS_DC);
 static int mmc_read_value(mmc_t *, char **, int *, char **, int *, int *, unsigned long * TSRMLS_DC);
 static int mmc_flush(mmc_t *, int TSRMLS_DC);
 static void php_mmc_store(INTERNAL_FUNCTION_PARAMETERS, char *, int);
-static void php_mmc_get(mmc_pool_t *pool, zval *zkey, zval **return_value, zval *flags, zval *cas);
+static void php_mmc_get(mmc_pool_t *pool, zval *zkey, zval **return_value, zval **status_array, zval *flags, zval *cas);
 static int mmc_get_stats(mmc_t *, char *, int, int, zval * TSRMLS_DC);
 static int mmc_incr_decr(mmc_t *, int, char *, int, int, long * TSRMLS_DC);
 static void php_mmc_incr_decr(INTERNAL_FUNCTION_PARAMETERS, int);
@@ -1301,6 +1301,15 @@ static int mmc_str_left(char *haystack, char *needle, int haystack_len, int need
 }
 /* }}} */
 
+static int mmc_str(char *haystack, char *needle, int haystack_len, int needle_len) /* {{{ */
+{
+	char *found;
+
+	found = php_memnstr(haystack, needle, needle_len, haystack + haystack_len);
+	return (found ? 1 : 0);
+}
+/* }}} */
+
 static int mmc_sendcmd(mmc_t *mmc, const char *cmd, int cmdlen TSRMLS_DC) /* {{{ */
 {
 	char *command;
@@ -1486,7 +1495,60 @@ int mmc_exec_retrieval_cmd(mmc_pool_t *pool, const char *key, int key_len, zval 
 }
 /* }}} */
 
-static int mmc_exec_retrieval_cmd_multi(mmc_pool_t *pool, zval *keys, zval **return_value, zval *return_flags, zval *return_cas TSRMLS_DC) /* {{{ */
+
+static size_t tokenize_command(char *command, token_t *tokens, const size_t max_tokens) {
+	char *s, *e;
+	size_t ntokens = 0; 
+
+	assert(command != NULL && tokens != NULL && max_tokens > 1);
+
+	for (s = e = command; ntokens < max_tokens - 1; ++e) {
+		if (*e == ' ') {
+			if (s != e) { 
+				tokens[ntokens].value = s; 
+				tokens[ntokens].length = e - s; 
+				ntokens++;
+				*e = '\0';
+			}
+			s = e + 1; 
+		}
+		else if (*e == '\0') {
+			if (s != e) { 
+				tokens[ntokens].value = s; 
+				tokens[ntokens].length = e - s; 
+				ntokens++;
+			}
+
+			break; /* string end */
+		}
+	}    
+
+	/*   
+	 * If we scanned the whole string, the terminal value pointer is null,
+	 * otherwise it is the first unprocessed character.
+	 */
+	tokens[ntokens].value =  *e == '\0' ? NULL : e; 
+	tokens[ntokens].length = 0; 
+	ntokens++;
+
+	return ntokens;
+}
+
+
+
+static void update_result_array(zval **status_array, char *line) {
+	token_t tokens[MAX_TOKENS];
+	int i;
+	int ntokens = tokenize_command(line, (token_t *)&tokens, MAX_TOKENS);
+
+	for (i = 1; i < ntokens; i++) {
+		if (tokens[i].value)
+			add_assoc_bool_ex(*status_array, tokens[i].value, tokens[i].length + 1, 0);
+	}
+}
+
+static int mmc_exec_retrieval_cmd_multi(
+	mmc_pool_t *pool, zval *keys, zval **return_value, zval **status_array, zval *return_flags, zval *return_cas TSRMLS_DC) /* {{{ */
 {
 	mmc_t *mmc;
 	HashPosition pos;
@@ -1496,11 +1558,16 @@ static int mmc_exec_retrieval_cmd_multi(mmc_pool_t *pool, zval *keys, zval **ret
 	unsigned int key_len;
 	unsigned long cas;
 	unsigned long *pcas = (return_cas != NULL)? &cas: NULL;
-	
+	char *command_line[pool->num_servers];
+	int done = 0;
+
 	int	i = 0, j, num_requests, result, result_status, result_key_len, value_len, flags;
 	mmc_queue_t serialized = {0};		/* mmc_queue_t<zval *>, pointers to zvals which need unserializing */
 
 	array_init(*return_value);
+
+	if (status_array != NULL)
+		array_init(*status_array);
 	
 	if (return_flags != NULL) {
 		zval_dtor(return_flags);
@@ -1533,19 +1600,34 @@ static int mmc_exec_retrieval_cmd_multi(mmc_pool_t *pool, zval *keys, zval **ret
 					smart_str_appendl(&(mmc->outbuf), " ", 1);
 					smart_str_appendl(&(mmc->outbuf), key, key_len);
 					MMC_DEBUG(("mmc_exec_retrieval_cmd_multi: scheduled key '%s' for '%s:%d' request length '%d'", key, mmc->host, mmc->port, mmc->outbuf.len));
+					  /* for get2, mark this server as a good server for now */
+					 if (status_array && !done) 
+						 add_assoc_bool_ex(*status_array, key, key_len + 1, 1);
+					 
+				} else if (status_array) {
+					 /*for get2, key belongs to a failed server */
+					 add_assoc_bool_ex(*status_array, key, key_len + 1, 0);
 				}
+
 			}
-			
 			zend_hash_move_forward_ex(Z_ARRVAL_P(keys), &pos);
 		}
+		done = 1;
 
 		/* second pass to send requests in parallel */
 		for (j=0; j<num_requests; j++) {
 			smart_str_0(&(pool->requests[j]->outbuf));
 
+			if (status_array) {
+				command_line[j] = emalloc(pool->requests[j]->outbuf.len + 1);
+				memcpy(command_line[j], pool->requests[j]->outbuf.c, pool->requests[j]->outbuf.len);
+				command_line[j][pool->requests[j]->outbuf.len] = '\0';
+			}
+
 			if ((result = mmc_sendcmd(pool->requests[j], pool->requests[j]->outbuf.c, pool->requests[j]->outbuf.len TSRMLS_CC)) < 0) {
 				mmc_server_failure(pool->requests[j] TSRMLS_CC);
 				result_status = result;
+				update_result_array(&(*status_array), command_line[j]);
 			}
 		}
 
@@ -1577,7 +1659,7 @@ static int mmc_exec_retrieval_cmd_multi(mmc_pool_t *pool, zval *keys, zval **ret
 					if (return_cas != NULL) {
 						add_assoc_long_ex(return_cas, result_key, result_key_len + 1, cas);
 					}
-					
+
 					efree(result_key);
 				}
 
@@ -1585,12 +1667,19 @@ static int mmc_exec_retrieval_cmd_multi(mmc_pool_t *pool, zval *keys, zval **ret
 				if (result < 0) {
 					mmc_server_failure(pool->requests[j] TSRMLS_CC);
 					result_status = result;
+					update_result_array(&(*status_array), command_line[j]);
 				}
 			}
 
 			smart_str_free(&(pool->requests[j]->outbuf));
 		}
 	} while (result_status < 0 && MEMCACHE_G(allow_failover) && i++ < MEMCACHE_G(max_failover_attempts));
+
+	if (status_array) {
+		for (j=0; j < num_requests; j++) {
+			efree(command_line[j]);
+		}
+	}
 	
 	/* post-process serialized values */
 	if (serialized.len) {
@@ -1956,6 +2045,9 @@ static int mmc_incr_decr(mmc_t *mmc, int cmd, char *key, int key_len, int value,
 	MMC_DEBUG(("mmc_incr_decr: server's answer is: '%s'", mmc->inbuf));
 	if (mmc_str_left(mmc->inbuf, "NOT_FOUND", response_len, sizeof("NOT_FOUND") - 1)) {
 		MMC_DEBUG(("failed to %sement variable - item with such key not found", cmd > 0 ? "incr" : "decr"));
+		return 0;
+	} else if (mmc_str(mmc->inbuf, "non-numeric value", response_len, sizeof("non-numeric value") - 1)) {
+		MMC_DEBUG(("failed to %sement variable - item is non numeric value", cmd > 0 ? "incr" : "decr"));
 		return 0;
 	}
 	else if (mmc_str_left(mmc->inbuf, "ERROR", response_len, sizeof("ERROR") - 1) ||
@@ -2589,7 +2681,7 @@ PHP_FUNCTION(memcache_replace)
 PHP_FUNCTION(memcache_get2)
 {
 	mmc_pool_t *pool;
-	zval *zkey, *zval, *mmc_object = getThis(), *flags = NULL, *cas = NULL;
+	zval *zkey, *zval, *mmc_object = getThis(), *flags = NULL, *cas = NULL, *status_array;
 	char key[MMC_KEY_MAX_SIZE];
 	unsigned int key_len;
 
@@ -2612,10 +2704,11 @@ PHP_FUNCTION(memcache_get2)
 
 	zend_bool old_false_on_failure = pool->false_on_error;
 	pool->false_on_error = 1;
-	php_mmc_get(pool, zkey, &zval, flags, cas);
+	php_mmc_get(pool, zkey, &zval, &return_value, flags, cas);
 	pool->false_on_error = old_false_on_failure;
 
-
+	if (IS_ARRAY == Z_TYPE_P(return_value)) 
+		return;
 
 	if (Z_TYPE_P(zval) == IS_BOOL && Z_BVAL_P(zval) == 0) {
 		RETURN_FALSE;
@@ -2651,10 +2744,10 @@ PHP_FUNCTION(memcache_get)
 		RETURN_FALSE;
 	}
 
-	php_mmc_get(pool, zkey, &return_value, flags, cas);
+	php_mmc_get(pool, zkey, &return_value, NULL, flags, cas);
 }
 
-static void php_mmc_get(mmc_pool_t *pool, zval *zkey, zval **return_value, zval *flags, zval *cas) /* {{{ */
+static void php_mmc_get(mmc_pool_t *pool, zval *zkey, zval **return_value, zval **status_array, zval *flags, zval *cas) /* {{{ */
 {
 	char key[MMC_KEY_MAX_SIZE];
 	unsigned int key_len;
@@ -2670,7 +2763,7 @@ static void php_mmc_get(mmc_pool_t *pool, zval *zkey, zval **return_value, zval 
 			ZVAL_FALSE(*return_value);
 		}
 	} else if (zend_hash_num_elements(Z_ARRVAL_P(zkey))){
-		if (mmc_exec_retrieval_cmd_multi(pool, zkey, return_value, flags, cas TSRMLS_CC) < 0) {
+		if (mmc_exec_retrieval_cmd_multi(pool, zkey, return_value, status_array, flags, cas TSRMLS_CC) < 0) {
 			zval_dtor(*return_value);
 			ZVAL_FALSE(*return_value);
 		}

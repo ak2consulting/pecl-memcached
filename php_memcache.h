@@ -152,6 +152,13 @@ typedef struct mmc_pool {
 	zend_bool				false_on_error;
 } mmc_pool_t;
 
+typedef struct token_s {
+	char *value;
+	size_t length;
+} token_t;
+
+
+
 /* our globals */
 ZEND_BEGIN_MODULE_GLOBALS(memcache)
 	long debug_mode;
@@ -199,6 +206,10 @@ int mmc_exec_retrieval_cmd(mmc_pool_t *, const char *, int, zval **, zval *, zva
 int mmc_delete(mmc_t *, const char *, int, int TSRMLS_DC);
 mmc_t *mmc_get_proxy(TSRMLS_DC);
 void mmc_server_disconnect(mmc_t *mmc TSRMLS_DC);
+
+
+#define MAX_TOKENS 1024
+#define MAX_COMMAND_LINE_LEN 2048
 
 /* session handler struct */
 #if HAVE_MEMCACHE_SESSION
