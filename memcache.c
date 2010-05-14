@@ -250,7 +250,7 @@ PHP_INI_BEGIN()
 	STD_PHP_INI_ENTRY("memcache.chunk_size",		"8192",		PHP_INI_ALL, OnUpdateChunkSize,	chunk_size,		zend_memcache_globals,	memcache_globals)
 	STD_PHP_INI_ENTRY("memcache.hash_strategy",		"standard",	PHP_INI_ALL, OnUpdateHashStrategy,	hash_strategy,	zend_memcache_globals,	memcache_globals)
 	STD_PHP_INI_ENTRY("memcache.hash_function",		"crc32",	PHP_INI_ALL, OnUpdateHashFunction,	hash_function,	zend_memcache_globals,	memcache_globals)
-	STD_PHP_INI_ENTRY("memcache.default_timeout_ms",	"1000",	PHP_INI_ALL, OnUpdateDefaultTimeout,	default_timeout_ms,	zend_memcache_globals,	memcache_globals)
+	STD_PHP_INI_ENTRY("memcache.default_timeout_ms",	"10000",	PHP_INI_ALL, OnUpdateDefaultTimeout,	default_timeout_ms,	zend_memcache_globals,	memcache_globals)
 	STD_PHP_INI_ENTRY("memcache.compression_level",	"0",	PHP_INI_ALL, OnUpdateCompressionLevel,	compression_level,	zend_memcache_globals,	memcache_globals)
    STD_PHP_INI_ENTRY("memcache.tcp_nodelay",       "1",        PHP_INI_ALL, OnUpdateBool, tcp_nodelay,     zend_memcache_globals,  memcache_globals)
    STD_PHP_INI_ENTRY("memcache.null_on_keymiss",     "0",    PHP_INI_ALL, OnUpdateBool,  false_on_error,  zend_memcache_globals,  memcache_globals)
@@ -285,6 +285,8 @@ static int mmc_get_stats(mmc_t *, char *, int, int, zval * TSRMLS_DC);
 static int mmc_incr_decr(mmc_t *, int, char *, int, int, long * TSRMLS_DC);
 static void php_mmc_incr_decr(INTERNAL_FUNCTION_PARAMETERS, int);
 static void php_mmc_connect(INTERNAL_FUNCTION_PARAMETERS, int);
+static void mmc_init_multi(TSRMLS_D);
+static void mmc_free_multi(TSRMLS_D);
 /* }}} */
 
 /* {{{ hash strategies */
@@ -358,6 +360,7 @@ PHP_MSHUTDOWN_FUNCTION(memcache)
 PHP_RINIT_FUNCTION(memcache)
 {
 	MEMCACHE_G(debug_mode) = 0;
+	MEMCACHE_G(in_multi) = 0;
 	return SUCCESS;
 }
 /* }}} */
@@ -1367,6 +1370,13 @@ static int mmc_parse_response(mmc_t *mmc, char *response, int response_len, char
 		return -1;
 	}
 
+	int valsize = sizeof("VALUE ") -1;
+	if (response_len < valsize || 
+		strncmp(response, "VALUE ", valsize) != 0) {
+		mmc_server_received_error(mmc, response_len);
+		return -1;
+	}
+
 	MMC_DEBUG(("mmc_parse_response: got response '%s'", response));
 
 	for (i=0, n=0; i < response_len && n < nspaces; i++) {
@@ -1579,6 +1589,8 @@ static int mmc_exec_retrieval_cmd_multi(
 		array_init(return_cas);
 	}
 
+	mmc_init_multi(TSRMLS_C);
+
 	/* until no retrival errors or all servers have failed */
 	do {
 		result_status = 0; num_requests = 0;
@@ -1691,7 +1703,9 @@ static int mmc_exec_retrieval_cmd_multi(
 		mmc_queue_free(&serialized);
 	}
 
-	return result_status;
+	mmc_free_multi(TSRMLS_C);
+
+	return (status_array != NULL)? 0: result_status;
 }
 /* }}} */
 
@@ -1741,7 +1755,7 @@ static int mmc_read_value(mmc_t *mmc, char **key, int *key_len, char **value, in
 		}
 		efree(data);
 		php_error_docref(NULL TSRMLS_CC, E_NOTICE, "unable to uncompress data - lzo init failed");
-		return 0;
+		return -1;
 	}
 
 	if (((*flags & MMC_COMPRESSED) || (*flags & MMC_COMPRESSED_LZO)) && data_len > 0) {
@@ -1755,7 +1769,7 @@ static int mmc_read_value(mmc_t *mmc, char **key, int *key_len, char **value, in
 			}
 			efree(data);
 			php_error_docref(NULL TSRMLS_CC, E_NOTICE, "unable to uncompress data");
-			return 0;
+			return -1;
 		}
 
 		efree(data);
@@ -2238,7 +2252,7 @@ static void php_mmc_connect (INTERNAL_FUNCTION_PARAMETERS, int persistent) /* {{
 
     failed = 0;
     if (MEMCACHE_G(proxy_enabled)) {
-        mmc->proxy = mmc_get_proxy(TSRMLS_CC);
+        mmc->proxy = mmc_get_proxy(TSRMLS_C);
         if (mmc->proxy == NULL) {
             failed = 1;
         } else {
@@ -2297,7 +2311,24 @@ static void php_mmc_connect (INTERNAL_FUNCTION_PARAMETERS, int persistent) /* {{
 }
 /* }}} */
 
-mmc_t *mmc_get_proxy(TSRMLS_DC) /* {{{ */
+static void mmc_init_multi(TSRMLS_D)
+{
+	MEMCACHE_G(in_multi) = 1;
+}
+
+static void mmc_free_multi(TSRMLS_D)
+{
+	MEMCACHE_G(in_multi) = 0;
+	mmc_t *mmc = MEMCACHE_G(temp_proxy_list);
+	while (mmc != NULL) {
+		mmc_t *tmp = mmc->next;
+		mmc_server_free(mmc TSRMLS_CC);
+		mmc = tmp;
+	}
+	MEMCACHE_G(temp_proxy_list) = NULL;
+}
+
+mmc_t *mmc_get_proxy(TSRMLS_D) /* {{{ */
 {
 	char *host, *error_string = NULL;
     int host_len, timeout = 1000;
@@ -2310,13 +2341,14 @@ mmc_t *mmc_get_proxy(TSRMLS_DC) /* {{{ */
     host_len = MEMCACHE_G(proxy_hostlen);
 
     if (!host) return NULL;
-    /*if (MEMCACHE_G(in_multi)) {
-       mmc = mmc_server_new(host, host_len, port, 0, timeout, MMC_DEFAULT_RETRY TSRMLS_CC);
+
+    if (MEMCACHE_G(in_multi)) {
+    	mmc = mmc_server_new(host, host_len, port, 0, timeout, 0 TSRMLS_CC);
         mmc->next = MEMCACHE_G(temp_proxy_list);
         MEMCACHE_G(temp_proxy_list) = mmc;
-    } else { */
+    } else { 
        mmc = mmc_find_persistent(host, host_len, port, timeout, 0 TSRMLS_CC);
-    //}
+    }
 
    if (!mmc_open(mmc, 1, &error_string, &errnum TSRMLS_CC)) {
        php_error_docref(NULL TSRMLS_CC, E_WARNING, "Can't connect to mc proxy: %s:%ld, %s (%d)", host, port, error_string ? error_string : "Unknown error", errnum);

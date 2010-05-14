@@ -86,7 +86,7 @@ mmc_t *mmc_standard_find_server(void *s, const char *key, int key_len, zend_bool
 	mmc_t *mmc, *proxy = NULL;
 
     if (use_proxy) {
-        proxy = mmc_get_proxy(TSRMLS_CC);
+        proxy = mmc_get_proxy(TSRMLS_C);
         if (proxy == NULL) return NULL;
     }
 

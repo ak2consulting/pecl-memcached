@@ -116,6 +116,7 @@ typedef struct mmc {
 	zval					*failure_callback;
 	zend_bool				in_free;
 	struct mmc				*proxy;
+	struct mmc				*next;
 } mmc_t;
 
 /* hashing strategy */
@@ -172,13 +173,15 @@ ZEND_BEGIN_MODULE_GLOBALS(memcache)
 	long hash_strategy;
 	long hash_function;
 	long default_timeout_ms;
-    zend_bool tcp_nodelay;
-    zend_bool proxy_enabled;
-    zend_bool false_on_error;
-    char *proxy_host;
-    long proxy_port;
-    int proxy_hostlen;
+	zend_bool tcp_nodelay;
+	zend_bool proxy_enabled;
+	zend_bool false_on_error;
+	char *proxy_host;
+	long proxy_port;
+	int proxy_hostlen;
 	int connection_retry_count;
+	zend_bool in_multi;
+	mmc_t * temp_proxy_list;
     lzo_align_t __LZO_MMODEL lzo_wmem[ ((LZO1X_1_MEM_COMPRESS) + (sizeof(lzo_align_t) - 1)) / sizeof(lzo_align_t) ];
 ZEND_END_MODULE_GLOBALS(memcache)
 
@@ -204,7 +207,7 @@ int mmc_pool_store(mmc_pool_t *, const char *, int, const char *, int, int, int,
 int mmc_open(mmc_t *, int, char **, int * TSRMLS_DC);
 int mmc_exec_retrieval_cmd(mmc_pool_t *, const char *, int, zval **, zval *, zval * TSRMLS_DC);
 int mmc_delete(mmc_t *, const char *, int, int TSRMLS_DC);
-mmc_t *mmc_get_proxy(TSRMLS_DC);
+mmc_t *mmc_get_proxy(TSRMLS_D);
 void mmc_server_disconnect(mmc_t *mmc TSRMLS_DC);
 
 
